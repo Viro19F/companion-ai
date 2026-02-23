@@ -1,0 +1,575 @@
+// Companion AI — Prisma Schema
+// Full database schema for the AI Agent Marketplace
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================
+// USERS & AUTH
+// =====================
+
+model User {
+  id               String    @id @default(cuid())
+  email            String    @unique
+  name             String?
+  avatarUrl        String?
+  role             Role      @default(USER)
+  subscriptionTier UserTier  @default(FREE)
+  stripeCustomerId String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  accounts      OAuthAccount[]
+  sessions      Session[]
+  creator       Creator?
+  subscriptions Subscription[]
+  conversations Conversation[]
+  agentTeams    AgentTeam[]
+  permissions   UserPermission[]
+  reviews       Review[]
+  feedback      MessageFeedback[]
+
+  @@map("users")
+}
+
+model OAuthAccount {
+  id                String    @id @default(cuid())
+  userId            String
+  provider          String
+  providerAccountId String
+  accessToken       String?
+  refreshToken      String?
+  expiresAt         DateTime?
+  scopes            String[]
+  createdAt         DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("oauth_accounts")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+// =====================
+// CREATORS
+// =====================
+
+model Creator {
+  id               String      @id @default(cuid())
+  userId           String      @unique
+  displayName      String
+  bio              String?
+  website          String?
+  twitter          String?
+  verified         Boolean     @default(false)
+  tier             CreatorTier @default(STARTER)
+  commissionRate   Decimal     @default(0.30) @db.Decimal(5, 4)
+  stripeAccountId  String?
+  totalRevenue     Decimal     @default(0) @db.Decimal(12, 2)
+  totalSubscribers Int         @default(0)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agents   Agent[]
+  payouts  Payout[]
+  transactions Transaction[]
+
+  @@map("creators")
+}
+
+// =====================
+// AGENTS
+// =====================
+
+model Agent {
+  id             String      @id @default(cuid())
+  creatorId      String
+  slug           String      @unique
+  name           String
+  tagline        String?
+  description    String?
+  iconUrl        String?
+  coverImageUrl  String?
+  category       String?
+  tags           String[]
+
+  // Pricing
+  pricingModel   PricingModel @default(SUBSCRIPTION)
+  priceMonthly   Decimal?     @db.Decimal(10, 2)
+  priceYearly    Decimal?     @db.Decimal(10, 2)
+  hasFreeTier    Boolean      @default(false)
+  freeTierLimits Json?
+  trialDays      Int          @default(7)
+
+  // Agent Configuration
+  systemPrompt   String
+  personality    Json?
+  capabilities   String[]
+  model          String       @default("claude-sonnet-4-6")
+  temperature    Decimal      @default(0.7) @db.Decimal(2, 1)
+  maxTokens      Int          @default(4096)
+
+  // Knowledge Base
+  knowledgeBaseId String?
+
+  // Custom Logic
+  workflowConfig Json?
+  codeSnippets   Json?
+
+  // Integrations
+  allowedApis    String[]
+  webhooks       Json?
+
+  // Status
+  status         AgentStatus  @default(DRAFT)
+  version        Int          @default(1)
+  publishedAt    DateTime?
+
+  // Stats (denormalized)
+  totalSubscribers    Int      @default(0)
+  totalConversations  Int      @default(0)
+  avgRating           Decimal? @db.Decimal(3, 2)
+  ratingCount         Int      @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  creator       Creator         @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  versions      AgentVersion[]
+  subscriptions Subscription[]
+  conversations Conversation[]
+  teamMembers   AgentTeamMember[]
+  permissions   UserPermission[]
+  reviews       Review[]
+  events        AgentEvent[]
+  dailyStats    AgentStatsDaily[]
+  transactions  Transaction[]
+  knowledgeBase KnowledgeBase?
+
+  @@index([category])
+  @@index([status])
+  @@index([creatorId])
+  @@map("agents")
+}
+
+model AgentVersion {
+  id             String   @id @default(cuid())
+  agentId        String
+  version        Int
+  systemPrompt   String?
+  personality    Json?
+  capabilities   String[]
+  workflowConfig Json?
+  codeSnippets   Json?
+  publishedAt    DateTime @default(now())
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, version])
+  @@map("agent_versions")
+}
+
+// =====================
+// SUBSCRIPTIONS
+// =====================
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  userId               String
+  agentId              String
+  status               SubscriptionStatus @default(ACTIVE)
+  tier                 String?
+  stripeSubscriptionId String?
+  currentPeriodStart   DateTime?
+  currentPeriodEnd     DateTime?
+  cancelAt             DateTime?
+  messagesThisPeriod   Int                @default(0)
+  lastUsedAt           DateTime?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent        Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  reviews      Review[]
+  transactions Transaction[]
+  teamMembers  AgentTeamMember[]
+
+  @@unique([userId, agentId])
+  @@index([userId])
+  @@index([agentId])
+  @@map("subscriptions")
+}
+
+// =====================
+// CONVERSATIONS & MESSAGES
+// =====================
+
+model Conversation {
+  id            String   @id @default(cuid())
+  userId        String
+  agentId       String?
+  title         String?
+  isTeamChat    Boolean  @default(false)
+  teamId        String?
+  sharedContext Json?
+  archived      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent    Agent?     @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  team     AgentTeam? @relation(fields: [teamId], references: [id])
+  messages Message[]
+
+  @@map("conversations")
+}
+
+model Message {
+  id             String   @id @default(cuid())
+  conversationId String
+  role           String
+  content        String?
+  agentId        String?
+  toolCalls      Json?
+  toolResults    Json?
+  tokensUsed     Int?
+  modelUsed      String?
+  latencyMs      Int?
+  createdAt      DateTime @default(now())
+
+  conversation Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  feedback     MessageFeedback[]
+
+  @@index([conversationId])
+  @@map("messages")
+}
+
+model MessageFeedback {
+  id           String   @id @default(cuid())
+  messageId    String
+  userId       String
+  feedback     String
+  feedbackText String?
+  createdAt    DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("message_feedback")
+}
+
+// =====================
+// AGENT TEAMS
+// =====================
+
+model AgentTeam {
+  id                   String            @id @default(cuid())
+  userId               String
+  name                 String
+  description          String?
+  leadAgentId          String?
+  collaborationMode    CollaborationMode @default(PARALLEL)
+  sharedContextEnabled Boolean           @default(true)
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  members       AgentTeamMember[]
+  conversations Conversation[]
+
+  @@map("agent_teams")
+}
+
+model AgentTeamMember {
+  id             String   @id @default(cuid())
+  teamId         String
+  agentId        String
+  subscriptionId String
+  role           String   @default("member")
+  priority       Int      @default(0)
+  triggers       String[]
+
+  team         AgentTeam    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  agent        Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, agentId])
+  @@map("agent_team_members")
+}
+
+// =====================
+// PERMISSIONS
+// =====================
+
+model UserPermission {
+  id                String   @id @default(cuid())
+  userId            String
+  agentId           String
+  permissions       Json
+  connectedAccounts Json?
+  grantedAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, agentId])
+  @@map("user_permissions")
+}
+
+// =====================
+// REVIEWS
+// =====================
+
+model Review {
+  id             String       @id @default(cuid())
+  userId         String
+  agentId        String
+  rating         Int
+  title          String?
+  body           String?
+  subscriptionId String?
+  verified       Boolean      @default(false)
+  status         ReviewStatus @default(PUBLISHED)
+  helpfulCount   Int          @default(0)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent        Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@unique([userId, agentId])
+  @@map("reviews")
+}
+
+// =====================
+// ANALYTICS
+// =====================
+
+model AgentEvent {
+  id         String   @id @default(cuid())
+  agentId    String
+  userId     String?
+  eventType  String
+  properties Json?
+  createdAt  DateTime @default(now())
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, createdAt])
+  @@index([eventType, createdAt])
+  @@map("agent_events")
+}
+
+model AgentStatsDaily {
+  id             String   @id @default(cuid())
+  agentId        String
+  date           DateTime @db.Date
+  views          Int      @default(0)
+  uniqueVisitors Int      @default(0)
+  trialStarts    Int      @default(0)
+  subscriptions  Int      @default(0)
+  cancellations  Int      @default(0)
+  conversations  Int      @default(0)
+  messages       Int      @default(0)
+  revenue        Decimal  @default(0) @db.Decimal(12, 2)
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, date])
+  @@map("agent_stats_daily")
+}
+
+// =====================
+// BILLING
+// =====================
+
+model Transaction {
+  id                String            @id @default(cuid())
+  userId            String?
+  creatorId         String?
+  agentId           String?
+  subscriptionId    String?
+  type              TransactionType
+  amount            Decimal           @db.Decimal(12, 2)
+  currency          String            @default("USD")
+  platformFee       Decimal?          @db.Decimal(12, 2)
+  creatorAmount     Decimal?          @db.Decimal(12, 2)
+  stripePaymentId   String?
+  stripeTransferId  String?
+  status            TransactionStatus @default(PENDING)
+  createdAt         DateTime          @default(now())
+
+  user         User?         @relation(fields: [userId], references: [id])
+  creator      Creator?      @relation(fields: [creatorId], references: [id])
+  agent        Agent?        @relation(fields: [agentId], references: [id])
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@map("transactions")
+}
+
+model Payout {
+  id             String        @id @default(cuid())
+  creatorId      String
+  amount         Decimal       @db.Decimal(12, 2)
+  currency       String        @default("USD")
+  stripePayoutId String?
+  status         PayoutStatus  @default(PENDING)
+  periodStart    DateTime?     @db.Date
+  periodEnd      DateTime?     @db.Date
+  createdAt      DateTime      @default(now())
+  paidAt         DateTime?
+
+  creator Creator @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+  @@map("payouts")
+}
+
+// =====================
+// KNOWLEDGE BASES
+// =====================
+
+model KnowledgeBase {
+  id              String              @id @default(cuid())
+  agentId         String              @unique
+  name            String?
+  type            KnowledgeBaseType?
+  vectorNamespace String?
+  status          ProcessingStatus    @default(PROCESSING)
+  documentCount   Int                 @default(0)
+  chunkCount      Int                 @default(0)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  agent     Agent               @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  documents KnowledgeDocument[]
+
+  @@map("knowledge_bases")
+}
+
+model KnowledgeDocument {
+  id              String           @id @default(cuid())
+  knowledgeBaseId String
+  filename        String?
+  fileUrl         String?
+  fileType        String?
+  fileSize        Int?
+  status          ProcessingStatus @default(PENDING)
+  chunkCount      Int              @default(0)
+  errorMessage    String?
+  createdAt       DateTime         @default(now())
+  processedAt     DateTime?
+
+  knowledgeBase KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+
+  @@map("knowledge_documents")
+}
+
+// =====================
+// ENUMS
+// =====================
+
+enum Role {
+  USER
+  CREATOR
+  ADMIN
+}
+
+enum UserTier {
+  FREE
+  PLUS
+  PRO
+  TEAM
+}
+
+enum CreatorTier {
+  STARTER
+  PRO
+  ENTERPRISE
+}
+
+enum PricingModel {
+  FREE
+  SUBSCRIPTION
+  USAGE
+}
+
+enum AgentStatus {
+  DRAFT
+  REVIEW
+  PUBLISHED
+  SUSPENDED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  TRIALING
+}
+
+enum CollaborationMode {
+  PARALLEL
+  SEQUENTIAL
+  HIERARCHICAL
+}
+
+enum ReviewStatus {
+  PUBLISHED
+  HIDDEN
+  FLAGGED
+}
+
+enum TransactionType {
+  SUBSCRIPTION
+  PAYOUT
+  REFUND
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+enum PayoutStatus {
+  PENDING
+  IN_TRANSIT
+  PAID
+  FAILED
+}
+
+enum KnowledgeBaseType {
+  DOCUMENTS
+  WEBSITE
+  API
+}
+
+enum ProcessingStatus {
+  PENDING
+  PROCESSING
+  READY
+  INDEXED
+  ERROR
+}
